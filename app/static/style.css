@@ -1,0 +1,107 @@
+:root {
+  --bg: #f5f6f8;
+  --panel: #ffffff;
+  --ink: #1f2430;
+  --muted: #6b7280;
+  --line: #e3e6ea;
+  --accent: #2f6fde;
+  --danger: #c0392b;
+  --ok: #1f8a4c;
+  --warn: #b7791f;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 15px/1.55 system-ui, -apple-system, "Segoe UI", "Noto Sans CJK SC", sans-serif;
+}
+code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+code { font-size: 0.92em; background: #eef1f5; padding: 0 4px; border-radius: 3px; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+.topbar {
+  display: flex; justify-content: space-between; align-items: center;
+  gap: 24px; padding: 18px 28px; background: #16202e; color: #f4f6f9;
+}
+.topbar h1 { margin: 0; font-size: 20px; }
+.topbar .sub { margin: 4px 0 0; color: #b7c2d1; font-size: 13px; }
+.topbar nav a { color: #dbe5f3; margin-left: 18px; font-size: 14px; }
+
+.layout {
+  display: grid; grid-template-columns: minmax(0, 1fr) 360px;
+  gap: 18px; padding: 18px 28px 48px; max-width: 1400px; margin: 0 auto;
+}
+@media (max-width: 1000px) { .layout { grid-template-columns: 1fr; } }
+
+.panel {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  padding: 18px 20px; margin: 0 auto; max-width: 1400px;
+}
+.layout .panel { margin: 0; }
+.layout > .panel:only-child { grid-column: 1 / -1; }
+.panel h2 { margin: 0 0 12px; font-size: 16px; }
+.panel h3 { margin: 22px 0 8px; font-size: 14px; color: var(--muted); }
+.panel-head { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; }
+
+.flash {
+  margin: 14px 28px 0; padding: 10px 14px; border-radius: 8px;
+  background: #fff7e6; border: 1px solid #f0d9a8; color: #6b4a08;
+}
+
+.meta-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px; margin: 10px 0 16px;
+}
+.meta-grid > div {
+  background: #f8fafc; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px;
+}
+.label { display: block; color: var(--muted); font-size: 12px; }
+.meta-grid strong { font-size: 13px; word-break: break-all; }
+
+table.records { width: 100%; border-collapse: collapse; font-size: 14px; }
+table.records th, table.records td {
+  text-align: left; padding: 9px 8px; border-bottom: 1px solid var(--line); vertical-align: top;
+}
+table.records th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; }
+table.records td.small, .small { font-size: 12px; }
+.empty { color: var(--muted); text-align: center; padding: 34px 0 !important; }
+
+.search { display: flex; gap: 6px; }
+.search input[type=search] {
+  padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px; min-width: 260px;
+}
+button {
+  padding: 8px 14px; border-radius: 7px; border: 1px solid var(--line);
+  background: #fff; cursor: pointer; font-size: 14px;
+}
+button:hover { border-color: #b9c3d0; }
+button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+button.danger { background: #fff; color: var(--danger); border-color: #e3b3ad; }
+button:disabled { opacity: .55; cursor: not-allowed; }
+.actions { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
+.hint { color: var(--muted); font-size: 12px; margin: 8px 0 0; }
+
+.progress {
+  background: #f8fafc; border: 1px solid var(--line); border-radius: 8px; padding: 12px;
+}
+.progress .row { display: flex; justify-content: space-between; padding: 3px 0; font-size: 13px; }
+.progress .row span:first-child { color: var(--muted); }
+.bar { height: 8px; background: #e6eaf0; border-radius: 4px; overflow: hidden; margin-top: 10px; }
+.bar > i { display: block; height: 100%; background: var(--accent); transition: width .3s; }
+
+.badge {
+  display: inline-block; padding: 1px 8px; border-radius: 20px;
+  font-size: 11px; background: #eef1f5; color: var(--muted); text-transform: uppercase;
+}
+.badge.running { background: #e4efff; color: #1d56b5; }
+.badge.succeeded { background: #e3f5ea; color: var(--ok); }
+.badge.failed { background: #fdecea; color: var(--danger); }
+.badge.cancelled { background: #fdf3e3; color: var(--warn); }
+
+.runlist { margin: 0; padding-left: 18px; font-size: 13px; }
+.runlist li { margin-bottom: 7px; line-height: 1.5; }
+.muted { color: var(--muted); }
+.pager { display: flex; gap: 16px; align-items: center; justify-content: center; padding: 14px 0 2px; font-size: 14px; }
+pre { white-space: pre-wrap; word-break: break-word; font-size: 12.5px; background: #f8fafc; padding: 14px; border-radius: 8px; }

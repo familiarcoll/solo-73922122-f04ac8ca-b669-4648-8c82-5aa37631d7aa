@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>轮次记录</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div>
+    <h1>轮次记录</h1>
+    <p class="sub">只有成功轮次会同时提交目录与水位；失败与取消不改动已发布内容。</p>
+  </div>
+  <nav><a href="/">目录</a><a href="/runs">轮次记录</a><a href="/status">状态 JSON</a></nav>
+</header>
+<main class="panel">
+  <div class="meta-grid">
+    <div><span class="label">已发布水位</span><strong>{{ published.watermark or "（未采集）" }}</strong></div>
+    <div><span class="label">目录条数</span><strong>{{ published.catalog_size }}</strong></div>
+    <div><span class="label">成功轮次</span><strong>{{ published.success_count }}</strong></div>
+  </div>
+  <table class="records">
+    <thead>
+      <tr>
+        <th>轮次</th><th>状态</th><th>时间窗（闭区间）</th><th>尝试</th>
+        <th>页</th><th>记录</th><th>分页重取</th><th>提交后水位</th><th>说明</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for run in runs %}
+      <tr>
+        <td class="mono">{{ run.id[:8] }}</td>
+        <td><span class="badge {{ run.status }}">{{ run.status }}</span></td>
+        <td class="mono small">{{ run.window_from or "（全量）" }} .. {{ run.window_until or "—" }}</td>
+        <td>{{ run.attempt }}</td>
+        <td>{{ run.pages_fetched }}</td>
+        <td>{{ run.records_seen }}</td>
+        <td>{{ run.token_restarts }}</td>
+        <td class="mono small">{{ run.watermark_after or "—" }}</td>
+        <td class="small">
+          {% if run.cancel_reason %}取消：{{ run.cancel_reason }}{% endif %}
+          {% if run.last_error %}{{ run.last_error }}{% endif %}
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="9" class="empty">还没有采集轮次。</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</main>
+</body>
+</html>

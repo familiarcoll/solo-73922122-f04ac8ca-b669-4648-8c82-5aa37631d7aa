@@ -1,0 +1,49 @@
+services:
+  demo-oai:
+    build: .
+    image: library-harvester:local
+    command: ["demo-oai"]
+    environment:
+      DATA_DIR: /data
+      DEMO_PAGE_SIZE: "3"
+    volumes:
+      - demo-data:/data
+    ports:
+      - "${DEMO_OAI_PORT:-8001}:8001"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/healthz', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
+
+  harvester:
+    build: .
+    image: library-harvester:local
+    command: ["app"]
+    environment:
+      DATA_DIR: /data
+      OAI_URL: http://demo-oai:8001/oai
+      OAI_READ_TIMEOUT: "20"
+      OAI_CONNECT_TIMEOUT: "10"
+      HARVEST_MAX_ATTEMPTS: "3"
+      HARVEST_RETRY_BACKOFF_MS: "300"
+    volumes:
+      - harvester-data:/data
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    depends_on:
+      demo-oai:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/status', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
+
+volumes:
+  demo-data:
+  harvester-data:

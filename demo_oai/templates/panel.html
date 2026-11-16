@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>演示 OAI-PMH 源</title>
+<style>
+  :root { --line:#e3e6ea; --muted:#6b7280; --accent:#6b4fbb; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:#f5f6f8; color:#1f2430; font:15px/1.55 system-ui, "Noto Sans CJK SC", sans-serif; }
+  header { background:#2b2340; color:#f4f2fb; padding:18px 28px; }
+  header h1 { margin:0; font-size:20px; }
+  header p { margin:4px 0 0; font-size:13px; color:#c8c0e0; }
+  main { max-width:1200px; margin:18px auto 48px; padding:0 20px; display:grid; gap:18px; }
+  .panel { background:#fff; border:1px solid var(--line); border-radius:10px; padding:18px 20px; }
+  .panel h2 { margin:0 0 12px; font-size:16px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:12px; }
+  label { display:block; font-size:12px; color:var(--muted); margin-bottom:3px; }
+  input[type=number], input[type=text] { width:100%; padding:7px 9px; border:1px solid var(--line); border-radius:7px; font:inherit; }
+  button { padding:8px 14px; border-radius:7px; border:1px solid var(--line); background:#fff; cursor:pointer; font:inherit; }
+  button.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+  button.danger { color:#b03024; border-color:#e3b3ad; }
+  form.inline { display:flex; gap:8px; align-items:end; flex-wrap:wrap; margin-top:10px; }
+  form.inline > div { flex:1 1 180px; }
+  .flash { margin:0 0 0; padding:10px 14px; border-radius:8px; background:#f3efff; border:1px solid #ded4f7; color:#43307c; }
+  table { width:100%; border-collapse:collapse; font-size:13.5px; }
+  th, td { text-align:left; padding:8px 7px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { font-size:11px; text-transform:uppercase; color:var(--muted); }
+  code, .mono { font-family:ui-monospace, Menlo, Consolas, monospace; font-size:12.5px; }
+  .muted { color:var(--muted); }
+  .tag { font-size:11px; padding:1px 7px; border-radius:20px; background:#eef1f5; }
+  .tag.deleted { background:#fdecea; color:#c0392b; }
+  .cols { display:grid; grid-template-columns:1fr 1fr; gap:18px; }
+  @media (max-width:900px){ .cols { grid-template-columns:1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>演示 OAI-PMH 源</h1>
+  <p>OAI 端点 <code>/oai</code> · 只提供 <code>ListRecords</code> / <code>oai_dc</code> · 秒级 UTC <code>datestamp</code></p>
+</header>
+<main>
+  {% if message %}<div class="flash">{{ message }}</div>{% endif %}
+
+  <section class="panel">
+    <h2>源端状态</h2>
+    <div class="grid">
+      <div><label>源端当前 UTC 时刻</label><strong class="mono">{{ state.now }}</strong></div>
+      <div><label>记录总数</label><strong>{{ state.record_total }}</strong></div>
+      <div><label>撤回态</label><strong>{{ state.deleted_total }}</strong></div>
+      <div><label>分页大小</label><strong>{{ state.page_size }}</strong></div>
+      <div><label>慢页延迟</label><strong>{{ state.slow_seconds }} 秒</strong></div>
+      <div><label>待触发令牌失效</label><strong>{{ state.token_failures }} 次</strong></div>
+      <div><label>令牌 TTL</label><strong>{{ state.token_ttl_seconds }} 秒</strong></div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>故障注入与分页设置</h2>
+    <form method="post" action="/demo/settings">
+      <div class="grid">
+        <div><label>分页大小 page_size</label><input type="number" name="page_size" min="1" max="50" value="{{ state.page_size }}"></div>
+        <div><label>慢页延迟（秒）</label><input type="number" name="slow_seconds" min="0" max="60" step="0.5" value="{{ state.slow_seconds }}"></div>
+        <div><label>触发令牌失效次数</label><input type="number" name="token_failures" min="0" max="20" value="{{ state.token_failures }}"></div>
+        <div><label>令牌 TTL（秒）</label><input type="number" name="token_ttl_seconds" min="0" max="86400" value="{{ state.token_ttl_seconds }}"></div>
+      </div>
+      <div class="inline"><button class="primary" type="submit">保存设置</button></div>
+    </form>
+    <p class="muted" style="font-size:12px;margin-bottom:0">
+      慢页：让每个 ListRecords 响应延迟，用于演示“取消不等慢页”。
+      令牌失效：下一次使用 resumptionToken 时返回 <code>badResumptionToken</code>，并使所有未用令牌作废。
+    </p>
+  </section>
+
+  <div class="cols">
+    <section class="panel">
+      <h2>新增书目</h2>
+      <form method="post" action="/demo/add">
+        <div><label>标题（必填）</label><input type="text" name="title" required></div>
+        <div><label>作者</label><input type="text" name="creator"></div>
+        <div><label>标识（留空自动生成）</label><input type="text" name="identifier" placeholder="oai:demo:..."></div>
+        <div class="inline"><button class="primary" type="submit">新增</button></div>
+      </form>
+
+      <h2 style="margin-top:22px">更正 / 撤回 / 恢复</h2>
+      <form method="post" action="/demo/correct">
+        <div><label>标识</label><input type="text" name="identifier" required placeholder="oai:demo:0001"></div>
+        <div><label>新标题（更正时才填）</label><input type="text" name="title"></div>
+        <div class="inline"><button type="submit">更正（更新 datestamp）</button></div>
+      </form>
+      <form method="post" action="/demo/withdraw" class="inline">
+        <div><label>撤回标识</label><input type="text" name="identifier" required placeholder="oai:demo:0001"></div>
+        <button class="danger" type="submit">撤回</button>
+      </form>
+      <form method="post" action="/demo/restore" class="inline">
+        <div><label>恢复标识</label><input type="text" name="identifier" required placeholder="oai:demo:0001"></div>
+        <button type="submit">恢复</button>
+      </form>
+      <form method="post" action="/demo/withdraw-all" class="inline">
+        <button class="danger" type="submit">撤回全部书目</button>
+      </form>
+    </section>
+
+    <section class="panel">
+      <h2>源端记录</h2>
+      <table>
+        <thead><tr><th>标识</th><th>标题</th><th>datestamp</th><th>状态</th></tr></thead>
+        <tbody>
+        {% for record in records %}
+          <tr>
+            <td class="mono">{{ record.identifier }}</td>
+            <td>{{ record.title or "—" }}</td>
+            <td class="mono">{{ record.datestamp }}</td>
+            <td>
+              {% if record.deleted %}<span class="tag deleted">deleted</span>{% else %}<span class="tag">live</span>{% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </section>
+  </div>
+
+  <section class="panel">
+    <h2>手工查询</h2>
+    <p class="mono" style="font-size:12.5px">
+      <a href="/oai?verb=Identify">/oai?verb=Identify</a><br>
+      <a href="/oai?verb=ListRecords&amp;metadataPrefix=oai_dc">/oai?verb=ListRecords&amp;metadataPrefix=oai_dc</a>
+    </p>
+  </section>
+</main>
+</body>
+</html>

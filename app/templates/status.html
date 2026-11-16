@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>状态 JSON</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div><h1>状态 JSON</h1><p class="sub">与 <code>/api/status</code> 相同的数据，静态渲染。</p></div>
+  <nav><a href="/">目录</a><a href="/runs">轮次记录</a><a href="/status">状态 JSON</a></nav>
+</header>
+<main class="panel">
+  <pre class="mono">{{ status | tojson(indent=2) }}</pre>
+</main>
+</body>
+</html>

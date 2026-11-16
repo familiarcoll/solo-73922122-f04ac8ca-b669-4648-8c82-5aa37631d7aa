@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>机构库采集控制台</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div>
+    <h1>机构库采集控制台</h1>
+    <p class="sub">OAI-PMH <code>ListRecords</code> · <code>oai_dc</code> · 全窗成功才发布</p>
+  </div>
+  <nav>
+    <a href="/">目录</a>
+    <a href="/runs">轮次记录</a>
+    <a href="/status">状态 JSON</a>
+  </nav>
+</header>
+
+{% if message %}<div class="flash">{{ message }}</div>{% endif %}
+
+<main class="layout">
+  <section class="panel grow">
+    <div class="panel-head">
+      <h2>已发布目录</h2>
+      <form class="search" method="get" action="/">
+        <input type="search" name="q" value="{{ catalogue.query }}" placeholder="按标识 / 标题 / 作者搜索">
+        <input type="hidden" name="page_size" value="{{ catalogue.page_size }}">
+        <button type="submit">搜索</button>
+      </form>
+    </div>
+
+    <div class="meta-grid">
+      <div><span class="label">已发布水位</span><strong id="watermark">{{ published.watermark or "（尚未成功采集）" }}</strong></div>
+      <div><span class="label">目录条数</span><strong id="catalog-size">{{ published.catalog_size }}</strong></div>
+      <div><span class="label">成功轮次</span><strong>{{ published.success_count }}</strong></div>
+      <div><span class="label">最近发布时间</span><strong>{{ published.updated_at or "—" }}</strong></div>
+    </div>
+
+    <table class="records">
+      <thead>
+        <tr><th>标识</th><th>标题</th><th>作者</th><th>源端时间</th></tr>
+      </thead>
+      <tbody>
+      {% for item in catalogue.records %}
+        <tr>
+          <td class="mono">{{ item.identifier }}</td>
+          <td>{{ item.title }}</td>
+          <td>{{ item.creator or "—" }}</td>
+          <td class="mono">{{ item.source_datestamp }}</td>
+        </tr>
+      {% else %}
+        <tr><td colspan="4" class="empty">
+          {% if catalogue.query %}没有匹配“{{ catalogue.query }}”的记录。{% else %}目录为空，点击右侧“开始新一轮”进行首次全量采集。{% endif %}
+        </td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+
+    {% if catalogue.pages > 1 %}
+    <nav class="pager">
+      {% if catalogue.page > 1 %}
+        <a href="/?q={{ catalogue.query|urlencode }}&page={{ catalogue.page - 1 }}&page_size={{ catalogue.page_size }}">上一页</a>
+      {% endif %}
+      <span>第 {{ catalogue.page }} / {{ catalogue.pages }} 页 · 共 {{ catalogue.total }} 条</span>
+      {% if catalogue.page < catalogue.pages %}
+        <a href="/?q={{ catalogue.query|urlencode }}&page={{ catalogue.page + 1 }}&page_size={{ catalogue.page_size }}">下一页</a>
+      {% endif %}
+    </nav>
+    {% else %}
+      <p class="small">共 {{ catalogue.total }} 条</p>
+    {% endif %}
+  </section>
+
+  <aside class="panel">
+    <h2>采集进度</h2>
+    <div id="run-area">
+      <p class="muted">加载中…</p>
+    </div>
+
+    <div class="actions">
+      <button id="btn-start" class="primary" type="button">开始新一轮</button>
+      <button id="btn-cancel" class="danger" type="button">取消当前轮次</button>
+      <button id="btn-restart" type="button">取消并立即重开</button>
+    </div>
+    <p class="hint">“取消”与“取消并立即重开”都不等待慢页返回：旧轮立即作废，不会发布；
+    重开时新轮马上开始，旧轮迟到的响应不会改动新轮状态。</p>
+
+    <h3>最近轮次</h3>
+    <ol class="runlist" id="run-history">
+      {% for run in runs %}
+      <li>
+        <span class="badge {{ run.status }}">{{ run.status }}</span>
+        <span class="mono">{{ run.started_at[11:19] }}</span>
+        <span>{{ (run.window_from or "全量") }} → {{ run.window_until or "—" }}</span>
+        <span class="muted">页 {{ run.pages_fetched }} · 记录 {{ run.records_seen }}</span>
+      </li>
+      {% endfor %}
+    </ol>
+  </aside>
+</main>
+
+<script src="/static/app.js" defer></script>
+</body>
+</html>
