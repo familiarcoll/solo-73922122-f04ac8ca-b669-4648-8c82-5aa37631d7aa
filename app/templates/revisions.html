@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>书目校订</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div>
+    <h1>书目校订</h1>
+    <p class="sub">源值单独保存 · 校订与源端更正逐字段合并 · 冲突显式解析</p>
+  </div>
+  <nav>
+    <a href="/">目录</a>
+    <a href="/revisions">书目校订</a>
+    <a href="/runs">轮次记录</a>
+    <a href="/status">状态 JSON</a>
+  </nav>
+</header>
+
+{% if message %}<div class="flash">{{ message }}</div>{% endif %}
+
+<main class="panel">
+  <div class="panel-head">
+    <h2>目录与校订状态</h2>
+    <form class="search" method="get" action="/revisions">
+      <input type="search" name="q" value="{{ catalogue.query }}" placeholder="按标识 / 标题 / 作者 / 源值搜索">
+      <input type="hidden" name="page_size" value="{{ catalogue.page_size }}">
+      <button type="submit">搜索</button>
+    </form>
+  </div>
+
+  <div class="meta-grid">
+    <div><span class="label">目录条数</span><strong>{{ catalogue.total }}</strong></div>
+    <div><span class="label">有校订的书目</span><strong id="revision-total">{{ catalogue.revision_total }}</strong></div>
+    <div><span class="label">待解冲突字段</span><strong id="conflict-total">{{ catalogue.conflict_total }}</strong></div>
+  </div>
+
+  <p class="hint">
+    合并规则：只看字段内容。只有源端改动则采用源值；只有校订改动则采用校订值；
+    两侧改成同一个值直接合并；两侧改成不同值则保留校订值并标记冲突，等待人工选择。
+    提交时如源值或校订已变化，整次提交会被拒绝并展示新的差异。
+  </p>
+
+  <table class="records">
+    <thead>
+      <tr>
+        <th>标识</th><th>当前显示（合并结果）</th><th>最新源值</th>
+        <th>校订值</th><th>状态</th><th>源端时间</th><th></th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for item in catalogue.records %}
+      <tr>
+        <td class="mono">{{ item.identifier }}</td>
+        <td>
+          <div>{{ item.title }}</div>
+          <div class="small muted">{{ item.creator or "—" }}</div>
+        </td>
+        <td>
+          <div>{{ item.source_title }}</div>
+          <div class="small muted">{{ item.source_creator or "—" }}</div>
+        </td>
+        <td>
+          {% if item.has_revision %}
+            <div>{{ item.revision_title }}</div>
+            <div class="small muted">{{ item.revision_creator or "—" }}</div>
+          {% else %}
+            <span class="muted">—</span>
+          {% endif %}
+        </td>
+        <td class="small">
+          {% if item.conflict_title or item.conflict_creator %}
+            <span class="badge failed">冲突</span>
+            <div class="muted">
+              {% if item.conflict_title %}标题{% endif %}
+              {% if item.conflict_title and item.conflict_creator %}·{% endif %}
+              {% if item.conflict_creator %}作者{% endif %}
+            </div>
+          {% elif item.has_revision %}
+            <span class="badge running">已校订</span>
+          {% else %}
+            <span class="badge">源值</span>
+          {% endif %}
+        </td>
+        <td class="mono small">{{ item.source_datestamp }}</td>
+        <td><a href="/revisions/{{ item.identifier | urlencode }}">校订 / 解冲突</a></td>
+      </tr>
+    {% else %}
+      <tr><td colspan="7" class="empty">
+        {% if catalogue.query %}没有匹配“{{ catalogue.query }}”的书目。{% else %}目录为空，请先在“目录”页开始采集。{% endif %}
+      </td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+
+  {% if catalogue.pages > 1 %}
+  <nav class="pager">
+    {% if catalogue.page > 1 %}
+      <a href="/revisions?q={{ catalogue.query|urlencode }}&page={{ catalogue.page - 1 }}&page_size={{ catalogue.page_size }}">上一页</a>
+    {% endif %}
+    <span>第 {{ catalogue.page }} / {{ catalogue.pages }} 页 · 共 {{ catalogue.total }} 条</span>
+    {% if catalogue.page < catalogue.pages %}
+      <a href="/revisions?q={{ catalogue.query|urlencode }}&page={{ catalogue.page + 1 }}&page_size={{ catalogue.page_size }}">下一页</a>
+    {% endif %}
+  </nav>
+  {% else %}
+    <p class="small">共 {{ catalogue.total }} 条</p>
+  {% endif %}
+</main>
+</body>
+</html>

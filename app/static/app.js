@@ -55,6 +55,10 @@
   function renderPublished(status, publishedEl, sizeEl) {
     if (publishedEl) publishedEl.textContent = status.published.watermark || "（尚未成功采集）";
     if (sizeEl) sizeEl.textContent = status.published.catalog_size;
+    const revEl = document.getElementById("revision-total");
+    const confEl = document.getElementById("conflict-total");
+    if (revEl) revEl.textContent = status.published.revision_count;
+    if (confEl) confEl.textContent = status.published.conflict_count;
   }
 
   async function poll() {

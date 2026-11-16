@@ -14,6 +14,7 @@
   </div>
   <nav>
     <a href="/">目录</a>
+    <a href="/revisions">书目校订</a>
     <a href="/runs">轮次记录</a>
     <a href="/status">状态 JSON</a>
   </nav>
@@ -37,22 +38,33 @@
       <div><span class="label">目录条数</span><strong id="catalog-size">{{ published.catalog_size }}</strong></div>
       <div><span class="label">成功轮次</span><strong>{{ published.success_count }}</strong></div>
       <div><span class="label">最近发布时间</span><strong>{{ published.updated_at or "—" }}</strong></div>
+      <div><span class="label">校订 / 冲突</span><strong><span id="revision-total">{{ revisions.revision_total }}</span> / <span id="conflict-total">{{ revisions.conflict_total }}</span></strong></div>
     </div>
 
     <table class="records">
       <thead>
-        <tr><th>标识</th><th>标题</th><th>作者</th><th>源端时间</th></tr>
+        <tr><th>标识</th><th>标题</th><th>作者</th><th>来源</th><th>源端时间</th></tr>
       </thead>
       <tbody>
       {% for item in catalogue.records %}
         <tr>
           <td class="mono">{{ item.identifier }}</td>
-          <td>{{ item.title }}</td>
-          <td>{{ item.creator or "—" }}</td>
+          <td>
+            {{ item.title }}
+            {% if item.conflict_title %}<span class="badge failed">标题冲突</span>{% endif %}
+            {% if item.origin_title == "revision" and not item.conflict_title %}<span class="badge running">校订</span>{% endif %}
+            {% if item.origin_title == "merged" %}<span class="badge succeeded">已合并</span>{% endif %}
+          </td>
+          <td>
+            {{ item.creator or "—" }}
+            {% if item.conflict_creator %}<span class="badge failed">作者冲突</span>{% endif %}
+            {% if item.origin_creator == "revision" and not item.conflict_creator %}<span class="badge running">校订</span>{% endif %}
+          </td>
+          <td class="small">{% if item.conflict_title or item.conflict_creator %}<a href="/revisions/{{ item.identifier | urlencode }}">解冲突</a>{% elif item.origin_title == "revision" or item.origin_creator == "revision" %}校订值{% else %}源值{% endif %}</td>
           <td class="mono">{{ item.source_datestamp }}</td>
         </tr>
       {% else %}
-        <tr><td colspan="4" class="empty">
+        <tr><td colspan="5" class="empty">
           {% if catalogue.query %}没有匹配“{{ catalogue.query }}”的记录。{% else %}目录为空，点击右侧“开始新一轮”进行首次全量采集。{% endif %}
         </td></tr>
       {% endfor %}

@@ -14,12 +14,15 @@ Endpoints:
 from __future__ import annotations
 
 import os
+from datetime import timezone
 from pathlib import Path
 from urllib.parse import parse_qsl
 
 from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
+
+import oaitime
 
 from .repository import DemoRepo, apply_slow_delay
 
@@ -109,11 +112,40 @@ async def add(
 
 
 @app.post("/demo/correct")
-async def correct(identifier: str = Form(...), title: str = Form(...)) -> RedirectResponse:
+async def correct(
+    identifier: str = Form(...),
+    title: str = Form(""),
+    creator: str = Form(""),
+    datestamp: str = Form(""),
+) -> RedirectResponse:
     try:
-        repo.touch_record(identifier.strip(), title=title.strip() or None)
+        explicit = None
+        raw_datestamp = datestamp.strip()
+        if raw_datestamp == "last":
+            # Convenience for the same-second demo: reuse the upper bound of
+            # the most recent ListRecords window.
+            raw_datestamp = (repo.get_meta("last_list_until") or "").strip()
+            if not raw_datestamp:
+                return _back("尚未收到采集请求，无法沿用上一时间窗的 datestamp")
+        if raw_datestamp:
+            try:
+                explicit = oaitime.parse_datestamp(raw_datestamp)
+            except oaitime.TimestampError:
+                return _back("datestamp 不是合法的 OAI 时间戳")
+        if explicit is not None:
+            repo.set_meta("last_list_until", _oai_fmt(explicit))
+        repo.touch_record(
+            identifier.strip(),
+            title=title.strip() or None,
+            creator=creator.strip() or None,
+            datestamp=explicit,
+        )
     except KeyError:
         return _back(f"记录 {identifier} 不存在")
+    if explicit is not None:
+        return _back(
+            "已更正记录（datestamp 按要求保留/指定，可用于演示同秒更正）"
+        )
     return _back("已更正记录（datestamp 更新为当前秒）")
 
 
@@ -149,6 +181,10 @@ async def state_json() -> JSONResponse:
             "records": repo.all_records(),
         }
     )
+
+
+def _oai_fmt(value) -> str:
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _back(message: str) -> RedirectResponse:

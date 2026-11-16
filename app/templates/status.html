@@ -9,7 +9,8 @@
 <body>
 <header class="topbar">
   <div><h1>状态 JSON</h1><p class="sub">与 <code>/api/status</code> 相同的数据，静态渲染。</p></div>
-  <nav><a href="/">目录</a><a href="/runs">轮次记录</a><a href="/status">状态 JSON</a></nav>
+  <nav><a href="/">目录</a><a href="/revisions">书目校订</a>
+    <a href="/runs">轮次记录</a><a href="/status">状态 JSON</a></nav>
 </header>
 <main class="panel">
   <pre class="mono">{{ status | tojson(indent=2) }}</pre>

@@ -5,6 +5,14 @@ database.  A harvest round writes into ``run_records`` (a per-run staging
 area) and only the final commit transaction copies staging into ``catalog``
 and advances the watermark.  This is what makes a failed or interrupted
 round a no-op for readers of the published catalogue.
+
+Cataloguer revisions live in ``revisions``, keyed by identifier and
+cascade-deleted with the catalogue row (withdrawal).  ``catalog`` keeps both
+the latest source values and the merged, cataloguer-visible values plus
+per-field conflict flags.  A harvest commit merges field by field (see
+:mod:`app.reconcile`) inside the same transaction that advances the
+watermark, so a revision submitted while a round was running is never simply
+overwritten.
 """
 
 from __future__ import annotations
@@ -15,6 +23,30 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
+
+from .reconcile import clean, merge_field
+
+REVISION_FIELDS = ("title", "creator")
+
+
+class RevisionRejected(Exception):
+    """A revision submission was refused as a whole.
+
+    ``status_code`` is 409 for concurrent changes and 400 for invalid input.
+    ``diff`` carries the current record so the caller can show what changed.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int = 409,
+        diff: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+        self.diff = diff or {}
 
 
 def utc_now_millis() -> str:
@@ -97,15 +129,73 @@ class Store:
                     title TEXT NOT NULL,
                     creator TEXT,
                     source_datestamp TEXT NOT NULL,
-                    harvested_at TEXT NOT NULL
+                    harvested_at TEXT NOT NULL,
+                    source_title TEXT NOT NULL DEFAULT '',
+                    source_creator TEXT NOT NULL DEFAULT '',
+                    origin_title TEXT NOT NULL DEFAULT 'source',
+                    origin_creator TEXT NOT NULL DEFAULT 'source',
+                    conflict_title INTEGER NOT NULL DEFAULT 0,
+                    conflict_creator INTEGER NOT NULL DEFAULT 0,
+                    source_version INTEGER NOT NULL DEFAULT 1
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_catalog_title ON catalog(title);
+
+                CREATE TABLE IF NOT EXISTS revisions (
+                    identifier TEXT PRIMARY KEY,
+                    base_title TEXT NOT NULL DEFAULT '',
+                    base_creator TEXT NOT NULL DEFAULT '',
+                    title_edited INTEGER NOT NULL DEFAULT 0,
+                    creator_edited INTEGER NOT NULL DEFAULT 0,
+                    title TEXT NOT NULL DEFAULT '',
+                    creator TEXT NOT NULL DEFAULT '',
+                    version INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (identifier)
+                        REFERENCES catalog(identifier) ON DELETE CASCADE
+                );
 
                 INSERT OR IGNORE INTO published_state
                     (id, watermark, updated_at, success_count, last_run_id)
                 VALUES (1, NULL, NULL, 0, NULL);
                 """
+            )
+            self._migrate_schema()
+
+    def _migrate_schema(self) -> None:
+        """Bring an existing catalogue database up to the revision schema.
+
+        The already-published title/creator become the initial source values,
+        so an existing catalogue keeps behaving exactly as before until a
+        cataloguer saves a revision.
+        """
+        columns = {
+            row["name"] for row in self._conn.execute("PRAGMA table_info(catalog)")
+        }
+        additions = {
+            "source_title": "TEXT NOT NULL DEFAULT ''",
+            "source_creator": "TEXT NOT NULL DEFAULT ''",
+            "origin_title": "TEXT NOT NULL DEFAULT 'source'",
+            "origin_creator": "TEXT NOT NULL DEFAULT 'source'",
+            "conflict_title": "INTEGER NOT NULL DEFAULT 0",
+            "conflict_creator": "INTEGER NOT NULL DEFAULT 0",
+            "source_version": "INTEGER NOT NULL DEFAULT 1",
+        }
+        added_source = False
+        for name, ddl in additions.items():
+            if name not in columns:
+                self._conn.execute(f"ALTER TABLE catalog ADD COLUMN {name} {ddl}")
+                if name == "source_title":
+                    added_source = True
+        if added_source:
+            # Initial source values are the already published values.
+            self._conn.execute(
+                "UPDATE catalog SET source_title = title WHERE source_title = ''"
+            )
+            self._conn.execute(
+                "UPDATE catalog SET source_creator = COALESCE(creator, '')"
+                " WHERE source_creator = ''"
             )
 
     def _recover_interrupted_runs(self) -> None:
@@ -442,12 +532,18 @@ class Store:
             self._meta_set("active_run_id", None)
 
     def commit_run(self, run_id: str) -> dict[str, Any]:
-        """Atomically publish staging and advance the watermark.
+        """Atomically publish staging, merge revisions and advance the watermark.
 
         The check for ownership (``active_run_id``) happens inside the same
         IMMEDIATE transaction as the catalogue writes.  A cancelled or
         superseded round can therefore never publish, even if its HTTP
         response arrives late.
+
+        Source values, the merged (cataloguer-visible) values, conflict flags
+        and the watermark all become visible in this one transaction.  A
+        revision committed while the round was fetching is never overwritten:
+        it is either kept, merged when both sides now agree, or kept with its
+        field flagged as a conflict.
         """
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
@@ -477,34 +573,26 @@ class Store:
                 now = utc_now_millis()
                 upserts = 0
                 deletions = 0
+                new_conflicts = 0
                 for row in rows:
                     if row["deleted"]:
+                        # Withdrawing removes the catalogue entry.  The
+                        # revision (and its conflicts) is removed with it, so
+                        # a later restore starts from the source values only.
                         self._conn.execute(
                             "DELETE FROM catalog WHERE identifier = ?",
                             (row["identifier"],),
                         )
                         deletions += 1
                     else:
-                        self._conn.execute(
-                            """
-                            INSERT INTO catalog
-                                (identifier, title, creator, source_datestamp,
-                                 harvested_at)
-                            VALUES (?, ?, ?, ?, ?)
-                            ON CONFLICT(identifier) DO UPDATE SET
-                                title = excluded.title,
-                                creator = excluded.creator,
-                                source_datestamp = excluded.source_datestamp,
-                                harvested_at = excluded.harvested_at
-                            """,
-                            (
-                                row["identifier"],
-                                row["title"] or "",
-                                row["creator"],
-                                row["datestamp"],
-                                now,
-                            ),
+                        conflicts = self._publish_source_record(
+                            identifier=row["identifier"],
+                            source_title=row["title"] or "",
+                            source_creator=row["creator"] or "",
+                            source_datestamp=row["datestamp"],
+                            harvested_at=now,
                         )
+                        new_conflicts += conflicts
                         upserts += 1
 
                 watermark = run["window_until"]
@@ -538,11 +626,157 @@ class Store:
                     "committed": True,
                     "upserts": upserts,
                     "deletions": deletions,
+                    "new_conflicts": new_conflicts,
                     "watermark": watermark,
                 }
             except BaseException:
                 self._conn.execute("ROLLBACK")
                 raise
+
+    def _publish_source_record(
+        self,
+        *,
+        identifier: str,
+        source_title: str,
+        source_creator: str,
+        source_datestamp: str,
+        harvested_at: str,
+    ) -> int:
+        """Merge one source record into the catalogue inside a transaction.
+
+        Returns the number of fields newly flagged as conflicts.
+        """
+        existing = self._conn.execute(
+            "SELECT * FROM catalog WHERE identifier = ?", (identifier,)
+        ).fetchone()
+        revision = self._conn.execute(
+            "SELECT * FROM revisions WHERE identifier = ?", (identifier,)
+        ).fetchone()
+
+        if revision is None:
+            title = clean(source_title)
+            creator = clean(source_creator)
+            origin_title = origin_creator = "source"
+            conflict_title = conflict_creator = 0
+        else:
+            title_merge = merge_field(
+                base=revision["base_title"],
+                revision=revision["title"],
+                source=source_title,
+                edited=bool(revision["title_edited"]),
+            )
+            creator_merge = merge_field(
+                base=revision["base_creator"],
+                revision=revision["creator"],
+                source=source_creator,
+                edited=bool(revision["creator_edited"]),
+            )
+            title = title_merge.value
+            creator = creator_merge.value
+            origin_title = title_merge.origin
+            origin_creator = creator_merge.origin
+            conflict_title = 1 if title_merge.conflict else 0
+            conflict_creator = 1 if creator_merge.conflict else 0
+
+            # A field whose revision no longer differs from the source basis
+            # has nothing left to express, so the revision follows the source.
+            # Conflicting fields keep their revision value and original basis
+            # until a cataloguer resolves them.
+            updates: dict[str, Any] = {}
+            if revision["title_edited"] and not conflict_title:
+                if (
+                    revision["base_title"] != clean(source_title)
+                    or revision["title"] != title
+                ):
+                    updates["base_title"] = clean(source_title)
+                    updates["title"] = title
+            if revision["creator_edited"] and not conflict_creator:
+                if (
+                    revision["base_creator"] != clean(source_creator)
+                    or revision["creator"] != creator
+                ):
+                    updates["base_creator"] = clean(source_creator)
+                    updates["creator"] = creator
+            if updates:
+                updates["version"] = revision["version"] + 1
+                updates["updated_at"] = utc_now_millis()
+                assignments = ", ".join(f"{key} = ?" for key in updates)
+                self._conn.execute(
+                    f"UPDATE revisions SET {assignments} WHERE identifier = ?",
+                    [*updates.values(), identifier],
+                )
+
+        if existing is None:
+            self._conn.execute(
+                """
+                INSERT INTO catalog
+                    (identifier, title, creator, source_datestamp,
+                     harvested_at, source_title, source_creator,
+                     origin_title, origin_creator, conflict_title,
+                     conflict_creator, source_version)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                """,
+                (
+                    identifier,
+                    title,
+                    creator or None,
+                    source_datestamp,
+                    harvested_at,
+                    clean(source_title),
+                    clean(source_creator),
+                    origin_title,
+                    origin_creator,
+                    conflict_title,
+                    conflict_creator,
+                ),
+            )
+            return conflict_title + conflict_creator
+
+        already_title = bool(existing["conflict_title"])
+        already_creator = bool(existing["conflict_creator"])
+        # Content version, not timestamp: an OAI datestamp has one-second
+        # precision, so a same-second correction must still invalidate a
+        # revision form that was opened before it.  Re-publishing identical
+        # content (the inclusive window always re-reads its lower bound) does
+        # not advance the version.
+        source_changed = (
+            clean(existing["source_title"]) != clean(source_title)
+            or clean(existing["source_creator"]) != clean(source_creator)
+        )
+        self._conn.execute(
+            """
+            UPDATE catalog
+               SET title = ?,
+                   creator = ?,
+                   source_datestamp = ?,
+                   harvested_at = ?,
+                   source_title = ?,
+                   source_creator = ?,
+                   origin_title = ?,
+                   origin_creator = ?,
+                   conflict_title = ?,
+                   conflict_creator = ?,
+                   source_version = source_version + ?
+             WHERE identifier = ?
+            """,
+            (
+                title,
+                creator or None,
+                source_datestamp,
+                harvested_at,
+                clean(source_title),
+                clean(source_creator),
+                origin_title,
+                origin_creator,
+                conflict_title,
+                conflict_creator,
+                1 if source_changed else 0,
+                identifier,
+            ),
+        )
+        new_title = conflict_title and not already_title
+        new_creator = conflict_creator and not already_creator
+        return int(new_title) + int(new_creator)
 
     def fail_run(self, run_id: str, error: str) -> bool:
         with self._lock:
@@ -566,6 +800,369 @@ class Store:
             except BaseException:
                 self._conn.execute("ROLLBACK")
                 raise
+
+    # --------------------------------------------------------------- revisions
+    def catalog_item(self, identifier: str) -> dict[str, Any] | None:
+        """One catalogue entry with its source values and conflict flags."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM catalog WHERE identifier = ?", (identifier,)
+            ).fetchone()
+            if row is None:
+                return None
+            item = dict(row)
+            revision = self._conn.execute(
+                "SELECT * FROM revisions WHERE identifier = ?", (identifier,)
+            ).fetchone()
+            item["revision"] = dict(revision) if revision else None
+            return item
+
+    def record_editor_view(self, identifier: str) -> dict[str, Any] | None:
+        """Everything the edit page needs for one identifier."""
+        item = self.catalog_item(identifier)
+        if item is None:
+            return None
+        revision = item["revision"]
+        return {
+            "identifier": identifier,
+            "title": item["title"],
+            "creator": item["creator"] or "",
+            "source": {
+                "title": item["source_title"],
+                "creator": item["source_creator"],
+            },
+            "source_datestamp": item["source_datestamp"],
+            "source_version": item["source_version"],
+            "conflicts": {
+                "title": bool(item["conflict_title"]),
+                "creator": bool(item["conflict_creator"]),
+            },
+            "origins": {
+                "title": item["origin_title"],
+                "creator": item["origin_creator"],
+            },
+            "revision": (
+                {
+                    "title": revision["title"],
+                    "creator": revision["creator"],
+                    "base": {
+                        "title": revision["base_title"],
+                        "creator": revision["base_creator"],
+                    },
+                    "edited": {
+                        "title": bool(revision["title_edited"]),
+                        "creator": bool(revision["creator_edited"]),
+                    },
+                    "version": revision["version"],
+                    "updated_at": revision["updated_at"],
+                }
+                if revision
+                else None
+            ),
+        }
+
+    def catalog_editor_page(
+        self, query: str = "", page: int = 1, page_size: int = 25
+    ) -> dict[str, Any]:
+        result = self.catalog_page(query, page, page_size)
+        with self._lock:
+            by_identifier = {
+                row["identifier"]: dict(row)
+                for row in self._conn.execute(
+                    "SELECT identifier, title, creator, title_edited,"
+                    " creator_edited FROM revisions"
+                )
+            }
+        for item in result["records"]:
+            revision = by_identifier.get(item["identifier"])
+            item["has_revision"] = revision is not None and (
+                revision["title_edited"] or revision["creator_edited"]
+            )
+            item["revision_title"] = revision["title"] if revision else None
+            item["revision_creator"] = revision["creator"] if revision else None
+        with self._lock:
+            result["conflict_total"] = int(
+                self._conn.execute(
+                    "SELECT COUNT(*) AS n FROM catalog"
+                    " WHERE conflict_title = 1 OR conflict_creator = 1"
+                ).fetchone()["n"]
+            )
+            result["revision_total"] = int(
+                self._conn.execute(
+                    "SELECT COUNT(*) AS n FROM revisions"
+                    " WHERE title_edited = 1 OR creator_edited = 1"
+                ).fetchone()["n"]
+            )
+        return result
+
+    def save_revision(
+        self,
+        identifier: str,
+        *,
+        title: str | None,
+        creator: str | None,
+        fields: Sequence[str],
+        base_source_version: int,
+        base_revision_version: int,
+        expect_revision: bool,
+        expect_source: dict[str, str] | None = None,
+        choices: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Create or replace a cataloguer revision, atomically.
+
+        The whole submission is rejected when either the source content or the
+        revision changed after the form was rendered.  The check and the write
+        happen under one lock/transaction, so a concurrent harvest commit can
+        be neither lost nor overwrite the revision.
+
+        ``choices`` optionally resolves conflicted fields (``source`` /
+        ``revision``) as part of the same submission, so a combined edit is
+        all-or-nothing too.
+        """
+        fields = [f for f in fields if f in REVISION_FIELDS]
+        choices = {
+            f: choice
+            for f, choice in (choices or {}).items()
+            if f in REVISION_FIELDS
+        }
+        if "title" in fields and not clean(title):
+            raise RevisionRejected("标题不能为空", status_code=400)
+        for field, choice in choices.items():
+            if choice not in ("source", "revision"):
+                raise RevisionRejected(
+                    f"字段 {field} 的解冲突选项无效", status_code=400
+                )
+        if not fields and not choices:
+            raise RevisionRejected(
+                "请至少勾选一个要校订的字段，或为冲突字段选择源值/校订值",
+                status_code=400,
+            )
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                item = self._conn.execute(
+                    "SELECT * FROM catalog WHERE identifier = ?", (identifier,)
+                ).fetchone()
+                if item is None:
+                    self._conn.execute("ROLLBACK")
+                    raise RevisionRejected(
+                        "书目不存在（可能已被撤回）", status_code=404
+                    )
+                revision = self._conn.execute(
+                    "SELECT * FROM revisions WHERE identifier = ?", (identifier,)
+                ).fetchone()
+                for field, choice in choices.items():
+                    if choice == "revision" and (
+                        revision is None or not revision[f"{field}_edited"]
+                    ):
+                        self._conn.execute("ROLLBACK")
+                        raise RevisionRejected(
+                            f"字段 {field} 没有可保留的校订值", status_code=400
+                        )
+
+                diff = self._revision_diff(item, revision)
+                stale: list[str] = []
+                if item["source_version"] != int(base_source_version):
+                    stale.append("source")
+                if expect_revision and revision is None:
+                    stale.append("revision")
+                if revision is not None and (
+                    revision["version"] != int(base_revision_version)
+                ):
+                    stale.append("revision")
+                # The textual expectation is a second guard for the HTML form:
+                # identical content re-observed at a later datestamp does not
+                # bump the version, but if the content itself differs from what
+                # the cataloguer saw, the submission is stale too.
+                if expect_source is not None and (
+                    clean(expect_source.get("title")) != clean(item["source_title"])
+                    or clean(expect_source.get("creator"))
+                    != clean(item["source_creator"])
+                ):
+                    stale.append("source")
+                if stale:
+                    self._conn.execute("ROLLBACK")
+                    raise RevisionRejected(
+                        "提交前源值或校订已变化，本次提交已整次拒绝",
+                        diff=diff,
+                    )
+
+                source = {
+                    "title": clean(item["source_title"]),
+                    "creator": clean(item["source_creator"]),
+                }
+                now = utc_now_millis()
+                if revision is None:
+                    self._conn.execute(
+                        """
+                        INSERT INTO revisions
+                            (identifier, base_title, base_creator,
+                             title_edited, creator_edited, title, creator,
+                             version, created_at, updated_at)
+                        VALUES (?, ?, ?, 0, 0, ?, ?, 0, ?, ?)
+                        """,
+                        (
+                            identifier,
+                            source["title"],
+                            source["creator"],
+                            clean(item["title"]),
+                            clean(item["creator"]),
+                            now,
+                            now,
+                        ),
+                    )
+                else:
+                    revision = self._conn.execute(
+                        "SELECT * FROM revisions WHERE identifier = ?",
+                        (identifier,),
+                    ).fetchone()
+
+                submitted = {
+                    "title": clean(title) if "title" in fields else None,
+                    "creator": clean(creator) if "creator" in fields else None,
+                }
+                column_assignments: list[str] = []
+                column_values: list[Any] = []
+                for field in fields:
+                    value = submitted[field] or ""
+                    edited = value != source[field]
+                    self._conn.execute(
+                        f"""
+                        UPDATE revisions
+                           SET base_{field} = ?,
+                               {field} = ?,
+                               {field}_edited = ?
+                         WHERE identifier = ?
+                        """,
+                        (source[field], value, int(edited), identifier),
+                    )
+                    column_assignments.append(f"{field} = ?")
+                    column_values.append(value if field == "title" else (value or None))
+                    column_assignments.append(f"origin_{field} = ?")
+                    column_values.append("revision" if edited else "source")
+                    column_assignments.append(f"conflict_{field} = 0")
+
+                for field, choice in choices.items():
+                    source_value = source[field]
+                    if choice == "source":
+                        self._conn.execute(
+                            f"UPDATE revisions SET {field} = ?,"
+                            f" base_{field} = ?, {field}_edited = 0"
+                            " WHERE identifier = ?",
+                            (source_value, source_value, identifier),
+                        )
+                        column_assignments += [
+                            f"{field} = ?",
+                            "origin_{} = ?".format(field),
+                            f"conflict_{field} = 0",
+                        ]
+                        column_values += [
+                            source_value if field == "title" else (source_value or None),
+                            "source",
+                        ]
+                    else:
+                        # Keep the revision value, but re-base it on the
+                        # current source value so it tracks future changes.
+                        keep = self._conn.execute(
+                            f"SELECT {field} FROM revisions WHERE identifier = ?",
+                            (identifier,),
+                        ).fetchone()
+                        revision_value = clean(keep[field]) if keep else ""
+                        self._conn.execute(
+                            f"UPDATE revisions SET base_{field} = ?"
+                            " WHERE identifier = ?",
+                            (source_value, identifier),
+                        )
+                        column_assignments += [
+                            f"{field} = ?",
+                            "origin_{} = ?".format(field),
+                            f"conflict_{field} = 0",
+                        ]
+                        column_values += [
+                            revision_value if field == "title" else (revision_value or None),
+                            "revision",
+                        ]
+                self._conn.execute(
+                    "UPDATE revisions SET version = version + 1, updated_at = ?"
+                    " WHERE identifier = ?",
+                    (now, identifier),
+                )
+                # Fields not submitted keep their current visible value (which
+                # may be a revision value or an unresolved conflict); they are
+                # deliberately not reset to the source.
+                if column_assignments:
+                    self._conn.execute(
+                        f"UPDATE catalog SET {', '.join(column_assignments)}"
+                        " WHERE identifier = ?",
+                        [*column_values, identifier],
+                    )
+                # A field accepted at its source value carries no revision, so
+                # its provenance is "source" even if an older revision row
+                # survives because another field is still edited.
+                for field in fields:
+                    if not int(
+                        self._conn.execute(
+                            f"SELECT {field}_edited FROM revisions"
+                            " WHERE identifier = ?",
+                            (identifier,),
+                        ).fetchone()[f"{field}_edited"]
+                    ):
+                        self._conn.execute(
+                            f"UPDATE catalog SET origin_{field} = 'source'"
+                            " WHERE identifier = ?",
+                            (identifier,),
+                        )
+                self._drop_empty_revision(identifier)
+                self._conn.execute("COMMIT")
+                return self.record_editor_view(identifier) or {}
+            except RevisionRejected:
+                raise
+            except BaseException:
+                self._conn.execute("ROLLBACK")
+                raise
+
+    def _drop_empty_revision(self, identifier: str) -> None:
+        """Remove a revision row that no longer edits any field."""
+        self._conn.execute(
+            "DELETE FROM revisions WHERE identifier = ?"
+            " AND title_edited = 0 AND creator_edited = 0",
+            (identifier,),
+        )
+
+    def _revision_diff(
+        self, item: sqlite3.Row, revision: sqlite3.Row | None
+    ) -> dict[str, Any]:
+        return {
+            "identifier": item["identifier"],
+            "source": {
+                "title": item["source_title"],
+                "creator": item["source_creator"],
+                "datestamp": item["source_datestamp"],
+                "version": item["source_version"],
+            },
+            "catalog": {
+                "title": item["title"],
+                "creator": item["creator"] or "",
+            },
+            "conflicts": {
+                "title": bool(item["conflict_title"]),
+                "creator": bool(item["conflict_creator"]),
+            },
+            "revision": (
+                {
+                    "title": revision["title"],
+                    "creator": revision["creator"],
+                    "edited": {
+                        "title": bool(revision["title_edited"]),
+                        "creator": bool(revision["creator_edited"]),
+                    },
+                    "version": revision["version"],
+                }
+                if revision
+                else None
+            ),
+            "changed_at": item["harvested_at"],
+        }
 
     def cancel_run(self, run_id: str, reason: str) -> bool:
         with self._lock:
@@ -606,6 +1203,18 @@ class Store:
                 "SELECT COUNT(*) AS n FROM catalog"
             ).fetchone()
             result["catalog_size"] = int(count["n"])
+            result["revision_count"] = int(
+                self._conn.execute(
+                    "SELECT COUNT(*) AS n FROM revisions"
+                    " WHERE title_edited = 1 OR creator_edited = 1"
+                ).fetchone()["n"]
+            )
+            result["conflict_count"] = int(
+                self._conn.execute(
+                    "SELECT COUNT(*) AS n FROM catalog"
+                    " WHERE conflict_title = 1 OR conflict_creator = 1"
+                ).fetchone()["n"]
+            )
             return result
 
     def catalog_page(
@@ -620,9 +1229,10 @@ class Store:
         if query:
             where = (
                 "WHERE identifier LIKE ? OR title LIKE ? "
-                "OR COALESCE(creator, '') LIKE ?"
+                "OR COALESCE(creator, '') LIKE ? "
+                "OR source_title LIKE ? OR source_creator LIKE ?"
             )
-            params = [like, like, like]
+            params = [like, like, like, like, like]
         with self._lock:
             total = self._conn.execute(
                 f"SELECT COUNT(*) AS n FROM catalog {where}", params
@@ -634,7 +1244,9 @@ class Store:
             rows = self._conn.execute(
                 f"""
                 SELECT identifier, title, creator, source_datestamp,
-                       harvested_at
+                       harvested_at, source_title, source_creator,
+                       origin_title, origin_creator,
+                       conflict_title, conflict_creator, source_version
                   FROM catalog {where}
                  ORDER BY title COLLATE NOCASE, identifier
                  LIMIT ? OFFSET ?

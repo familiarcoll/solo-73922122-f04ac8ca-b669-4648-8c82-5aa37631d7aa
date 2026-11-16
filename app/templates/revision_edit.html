@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>校订 {{ record.identifier }}</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div>
+    <h1>校订书目</h1>
+    <p class="sub mono">{{ record.identifier }}</p>
+  </div>
+  <nav>
+    <a href="/">目录</a>
+    <a href="/revisions">书目校订</a>
+    <a href="/runs">轮次记录</a>
+    <a href="/status">状态 JSON</a>
+  </nav>
+</header>
+
+{% if message %}<div class="flash">{{ message }}</div>{% endif %}
+{% if error %}<div class="flash error">{{ error }}</div>{% endif %}
+
+<main class="panel">
+  <div class="meta-grid">
+    <div>
+      <span class="label">源端 datestamp</span>
+      <strong class="mono">{{ record.source_datestamp }}</strong>
+    </div>
+    <div>
+      <span class="label">源值版本</span>
+      <strong>v{{ record.source_version }}</strong>
+    </div>
+    <div>
+      <span class="label">当前显示（合并结果）</span>
+      <strong>{{ record.title }}<br><span class="small muted">{{ record.creator or "—" }}</span></strong>
+    </div>
+    <div>
+      <span class="label">校订版本</span>
+      <strong>{{ ("v" ~ record.revision.version) if record.revision else "无校订" }}</strong>
+    </div>
+  </div>
+
+  {% if diff %}
+  <section class="diffbox">
+    <h3>提交前数据已变化（整次提交已拒绝）</h3>
+    <table class="records">
+      <thead><tr><th>字段</th><th>你打开表单时的源值</th><th>最新源值</th><th>打开时校订值</th><th>最新校订值</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>标题</td>
+          <td>{{ expect_source.title or "—" }}</td>
+          <td>{{ diff.source.title }}</td>
+          <td>{{ expect_revision.title or "—" }}</td>
+          <td>{{ (diff.revision.title if diff.revision else "—") or "—" }}</td>
+        </tr>
+        <tr>
+          <td>作者</td>
+          <td>{{ expect_source.creator or "—" }}</td>
+          <td>{{ diff.source.creator }}</td>
+          <td>{{ expect_revision.creator or "—" }}</td>
+          <td>{{ (diff.revision.creator if diff.revision else "—") or "—" }}</td>
+        </tr>
+      </tbody>
+    </table>
+    <p class="hint">请核对下方最新的源值与校订值后重新提交。重新提交将基于新版本。</p>
+  </section>
+  {% endif %}
+
+  <form method="post" action="/revisions/{{ record.identifier | urlencode }}" class="editform">
+    <input type="hidden" name="base_source_version" value="{{ record.source_version }}">
+    <input type="hidden" name="base_revision_version" value="{{ record.revision.version if record.revision else 0 }}">
+    <input type="hidden" name="expect_revision" value="{{ '1' if record.revision and (record.revision.edited.title or record.revision.edited.creator) else '0' }}">
+    <input type="hidden" name="expect_source_title" value="{{ record.source.title }}">
+    <input type="hidden" name="expect_source_creator" value="{{ record.source.creator }}">
+    <input type="hidden" name="expect_revision_title" value="{{ record.revision.title if record.revision else '' }}">
+    <input type="hidden" name="expect_revision_creator" value="{{ record.revision.creator if record.revision else '' }}">
+
+    {% for field, label in [("title", "标题"), ("creator", "作者")] %}
+    {% set has_conflict = record.conflicts[field] %}
+    <section class="fieldcard {{ 'conflicted' if has_conflict else '' }}">
+      <div class="fieldhead">
+        <h3>{{ label }}</h3>
+        {% if has_conflict %}<span class="badge failed">冲突</span>{% endif %}
+        {% if record.origins[field] == "revision" %}<span class="badge running">当前采用校订值</span>{% endif %}
+        {% if record.origins[field] == "merged" %}<span class="badge succeeded">两侧已一致</span>{% endif %}
+      </div>
+
+      <div class="values">
+        <div>
+          <span class="label">最新源值</span>
+          <div class="value mono">{{ record.source[field] or "（空）" }}</div>
+        </div>
+        <div>
+          <span class="label">校订值{% if record.revision and record.revision.edited[field] %}（已保存）{% endif %}</span>
+          <div class="value mono">
+            {% if record.revision and record.revision.edited[field] %}{{ record.revision[field] or "（空）" }}{% else %}—{% endif %}
+          </div>
+        </div>
+        <div>
+          <span class="label">当前显示</span>
+          <div class="value mono">{{ record[field] or "（空）" }}</div>
+        </div>
+      </div>
+
+      <label class="toggle">
+        <input type="checkbox" name="fields" value="{{ field }}"
+          {% if record.revision and record.revision.edited[field] %}checked{% endif %}>
+        校订此字段
+      </label>
+      <input class="fieldinput" type="text" name="{{ field }}"
+             value="{{ (record.revision[field] if record.revision and record.revision.edited[field] else record[field]) or '' }}"
+             placeholder="输入校订后的{{ label }}">
+
+      {% if has_conflict %}
+      <div class="resolve">
+        <span class="label">解冲突：选择要保留的值</span>
+        <label><input type="radio" name="{{ field }}_choice" value="source"> 采用源值（{{ record.source[field] or "空" }}）</label>
+        <label><input type="radio" name="{{ field }}_choice" value="revision" checked> 采用校订值（{{ record.revision[field] if record.revision else record[field] }}）</label>
+      </div>
+      {% endif %}
+    </section>
+    {% endfor %}
+
+    <div class="actions">
+      <button class="primary" type="submit" name="action" value="save">保存校订</button>
+      {% if record.conflicts.title or record.conflicts.creator %}
+      <button type="submit" name="action" value="resolve">按所选值解冲突</button>
+      {% endif %}
+      {% if record.revision or record.conflicts.title or record.conflicts.creator %}
+      <button class="danger" type="submit" name="action" value="take_source">放弃校订并全部采用源值</button>
+      {% endif %}
+      <a class="button-like" href="/revisions">返回列表</a>
+    </div>
+    <p class="hint">
+      未勾选“校订此字段”的字段保持当前显示值不变；“解冲突”只处理已标记冲突的字段。
+      保存时会校验源值版本与校订版本，任一侧在打开表单后发生变化都会整次拒绝。
+    </p>
+  </form>
+</main>
+</body>
+</html>

@@ -191,6 +191,13 @@ class DemoRepo:
             ).fetchall()
             return [dict(r) for r in rows]
 
+    def raw_record(self, identifier: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM records WHERE identifier = ?", (identifier,)
+            ).fetchone()
+            return dict(row) if row else None
+
     # ------------------------------------------------------------- mutations
     def add_record(
         self,
@@ -222,9 +229,22 @@ class DemoRepo:
                 ).fetchone()
             )
 
-    def touch_record(self, identifier: str, *, title: str | None = None) -> dict[str, Any]:
-        """Correct a record (newer datestamp), so the next harvest updates it."""
-        now = _fmt(datetime.now(timezone.utc).replace(microsecond=0))
+    def touch_record(
+        self,
+        identifier: str,
+        *,
+        title: str | None = None,
+        creator: str | None = None,
+        datestamp: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Correct a record (newer datestamp), so the next harvest updates it.
+
+        Passing an explicit ``datestamp`` allows a same-second correction demo
+        (the OAI timestamp does not move, the content does).
+        """
+        now = _fmt(
+            (datestamp or datetime.now(timezone.utc)).replace(microsecond=0)
+        )
         with self._lock:
             existing = self._conn.execute(
                 "SELECT * FROM records WHERE identifier = ?", (identifier,)
@@ -235,10 +255,11 @@ class DemoRepo:
                 """
                 UPDATE records
                    SET title = COALESCE(?, title),
+                       creator = COALESCE(?, creator),
                        datestamp = ?
                  WHERE identifier = ?
                 """,
-                (title, now, identifier),
+                (title, creator, now, identifier),
             )
             return dict(
                 self._conn.execute(
@@ -495,6 +516,11 @@ class DemoRepo:
                     return self._error("badArgument", "from 晚于 until")
             page_size = int(self.get_meta("page_size", "3") or 3)
             cursor = 0
+            # Remember the upper bound the harvester asked for.  A correction
+            # that reuses it keeps its datestamp while changing content, and
+            # still falls on the inclusive lower bound of the next window, so
+            # the same-second case is reproducible from the control panel.
+            self.set_meta("last_list_until", window_until)
 
         selected = self._select_window(window_from, window_until)
         if not selected:
